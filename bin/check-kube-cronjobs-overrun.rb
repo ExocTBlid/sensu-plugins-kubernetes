@@ -1,9 +1,9 @@
 #! /usr/bin/env ruby
 #
-#   check-kube-jobs-failed
+#   check-kube-cronjobs-failed
 #
 # DESCRIPTION:
-# => Check if jobs are failed
+# => Check if cronjobs have not run within the scheduled time.
 #
 # OUTPUT:
 #   plain text
@@ -34,8 +34,8 @@
 #                                  Exclude wins when a node is in both include and exclude lists
 #     --include-nodes              Include the specified nodes (comma separated list), an
 #                                  empty list includes all nodes
-# -f, --filter FILTER              Selector filter for jobs to be checked
-# -j, --jobs JOBS                  Optional list of jobs to check.
+# -f, --filter FILTER              Selector filter for cronjobs to be checked
+# -c, --cronjobs CRONJOBS                  Optional list of cronjobs to check.
 #                                  Defaults to 'all'
 #
 # NOTES:
@@ -51,18 +51,18 @@
 require 'sensu-plugins-kubernetes/cli'
 require 'sensu-plugins-kubernetes/exclude'
 
-class AlljobsAreReady < Sensu::Plugins::Kubernetes::CLI
+class AllcronjobsAreReady < Sensu::Plugins::Kubernetes::CLI
   @options = Sensu::Plugins::Kubernetes::CLI.options.dup
   include Sensu::Plugins::Kubernetes::Exclude
 
-  option :job_list,
-         description: 'List of jobs to check',
-         short: '-j JOBS',
-         long: '--jobs',
+  option :cronjob_list,
+         description: 'List of cronjobs to check',
+         short: '-c CRONJOBS',
+         long: '--cronjobs',
          default: 'all'
 
-  option :job_filter,
-         description: 'Selector filter for jobs to be checked',
+  option :cronjob_filter,
+         description: 'Selector filter for cronjobs to be checked',
          short: '-f FILTER',
          long: '--filter'
 
@@ -93,34 +93,35 @@ class AlljobsAreReady < Sensu::Plugins::Kubernetes::CLI
          default: ''
 
   def run
-    jobs_list = []
-    failed_jobs = []
-    jobs = []
-    if config[:job_filter].nil?
-      jobs_list = parse_list(config[:job_list])
-      jobs = client.get_jobs
+    cronjobs_list = []
+    failed_cronjobs = []
+    cronjobs = []
+    if config[:cronjob_filter].nil?
+      cronjobs_list = parse_list(config[:cronjob_list])
+      cronjobs = client.get_cronjobs
     else
-      jobs = client.get_jobs(label_selector: config[:job_filter].to_s)
-      if jobs.empty?
-        unknown 'The filter specified resulted in 0 jobs'
+      cronjobs = client.get_cronjobs(label_selector: config[:cronjob_filter].to_s)
+      if cronjobs.empty?
+        unknown 'The filter specified resulted in 0 cronjobs'
       end
-      jobs_list = ['all']
+      cronjobs_list = ['all']
     end
-    jobs.each do |job|
-      next if job.nil?
-      next if should_exclude_namespace(job.metadata.namespace)
-      next if should_exclude_node(job.spec.nodeName)
-      next unless jobs_list.include?(job.metadata.name) || jobs_list.include?('all')
-      # Check for failed state
-      next unless job.status.failed == 1
-      job_stamp = Time.parse(job.metadata.creationTimestamp)
-      puts job.metadata.name
-      failed_jobs << "#{job.metadata.namespace}.#{job.metadata.name}"
+    cronjobs.each do |cronjob|
+      next if cronjob.nil?
+      next if should_exclude_namespace(cronjob.metadata.namespace)
+      next if should_exclude_node(cronjob.spec.nodeName)
+      next unless cronjobs_list.include?(cronjob.metadata.name) || cronjobs_list.include?('all')
+      next if cronjob.status.lastScheduleTime.nil?
+      # Check for overrun
+      cronjob_last_run = Time.parse(cronjob.status.lastScheduleTime)
+      cronjob_last_scheduled = CronParser.new(cronjob.spec.schedule).last
+      puts cronjob.metadata.name
+      failed_cronjobs << "#{cronjob.metadata.namespace}.#{cronjob.metadata.name}" if cronjob_last_run != cronjob_last_scheduled
     end
-    if failed_jobs.empty?
-      ok 'All jobs are reporting as ready'
+    if failed_cronjobs.empty?
+      ok 'All cronjobs are reporting as ready'
     else
-      critical "jobs failed: #{failed_jobs.join(' ')}"
+      critical "cronjobs failed: #{failed_cronjobs.join(' ')}"
     end
   rescue KubeException => e
     critical 'API error: ' << e.message
